@@ -4,7 +4,9 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
-import Papa from 'papaparse';
+// We are still using all the helper functions we created
+import { fetchFullPoseData, parseCsvData, calculateScores } from './poseUtils';
+import { initMediaPipe, initCamera, drawPose, drawHud } from './mediaPipeUtils';
 
 export default function PoseDetail() {
   const params = useParams();
@@ -14,125 +16,55 @@ export default function PoseDetail() {
   const [isCoaching, setIsCoaching] = useState(false);
   const [scores, setScores] = useState({ full_body: 0, upper_body: 0, lower_body: 0 });
   const [fps, setFps] = useState(0);
+
+  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const poseInstanceRef = useRef(null);
+  const cameraRef = useRef(null);
   const referenceDataRef = useRef(null);
   const lastCheckRef = useRef(0);
   const prevTimeRef = useRef(0);
 
+  // --- Data Fetching ---
   useEffect(() => {
     if (params.poseName) {
-      fetchPose();
+      const poseName = decodeURIComponent(params.poseName);
+      fetchFullPoseData(poseName)
+        .then(data => {
+          setPose(data);
+          // Pre-parse the CSV data and store it in the ref
+          return parseCsvData(data.csvData);
+        })
+        .then(parsedData => {
+          referenceDataRef.current = parsedData.filter(r => Object.keys(r).length > 0);
+        })
+        .catch(err => {
+          setError(err.message);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
     }
+
     // Cleanup on unmount
     return () => stopCoaching();
   }, [params.poseName]);
 
-  const fetchPose = async () => {
-    try {
-      const poseName = decodeURIComponent(params.poseName);
-      const response = await fetch(`/api/poses/${encodeURIComponent(poseName)}`);
-      if (!response.ok) {
-        throw new Error('Pose not found');
-      }
-      const data = await response.json();
-      setPose(data);
-    } catch (error) {
-      setError(error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadReferenceCsv = async (csvFileName) => {
-    return new Promise((resolve, reject) => {
-      Papa.parse(`/csv/${csvFileName}`, {
-        download: true,
-        header: true,
-        dynamicTyping: true,
-        complete: (results) => {
-          if (results.errors && results.errors.length > 0) {
-            reject(results.errors[0]);
-          } else {
-            resolve(results.data);
-          }
-        },
-        error: (err) => reject(err),
-      });
-    });
-  };
-
+  // --- MediaPipe Logic ---
   const startCoaching = async () => {
-    if (!pose) return;
+    if (!pose || !referenceDataRef.current) {
+      alert('Pose data is not loaded yet.');
+      return;
+    }
 
     try {
       setIsCoaching(true);
-
-      // Load reference CSV
-      const refRows = await loadReferenceCsv(pose.csvFileName);
-      referenceDataRef.current = refRows.filter(r => Object.keys(r).length > 0);
-
-      // Check context
-      if (!window.isSecureContext && location.hostname !== 'localhost') {
-        throw new Error('Camera requires HTTPS or localhost. Please use https or run locally.');
-      }
-
-      // Prepare video element
-      if (videoRef.current) {
-        videoRef.current.setAttribute('playsinline', 'true');
-        videoRef.current.setAttribute('muted', 'true');
-        videoRef.current.muted = true;
-        videoRef.current.autoplay = true;
-      }
-
-      // Request webcam with robust constraints
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
-      } catch (e1) {
-        // Fallback constraints
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      }
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        try { await videoRef.current.play(); } catch {}
-      }
-
-      // Lazy import MediaPipe Pose and drawing utils
-      const [poseMod, drawing, camUtils] = await Promise.all([
-        import('@mediapipe/pose'),
-        import('@mediapipe/drawing_utils'),
-        import('@mediapipe/camera_utils'),
-      ]);
-
-      const { Pose, POSE_CONNECTIONS } = poseMod;
-
-      const poseInstance = new Pose({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
-      });
-      poseInstance.setOptions({
-        modelComplexity: 1,
-        smoothLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-      });
-
-      poseInstance.onResults((results) => {
-        drawAndScore(results, drawing, POSE_CONNECTIONS);
-      });
-
-      poseInstanceRef.current = poseInstance;
-
-      const camera = new camUtils.Camera(videoRef.current, {
-        onFrame: async () => {
-          await poseInstance.send({ image: videoRef.current });
-        },
-        width: 640,
-        height: 480,
-      });
-      camera.start();
+      // Wait for the new UI to render
+      setTimeout(async () => {
+        poseInstanceRef.current = await initMediaPipe(onPoseResults);
+        cameraRef.current = await initCamera(videoRef, poseInstanceRef.current);
+      }, 100);
     } catch (err) {
       console.error('Failed to start coaching', err);
       setIsCoaching(false);
@@ -142,6 +74,8 @@ export default function PoseDetail() {
 
   const stopCoaching = () => {
     setIsCoaching(false);
+    try { cameraRef.current?.stop?.(); } catch {}
+    cameraRef.current = null;
     if (poseInstanceRef.current) {
       try { poseInstanceRef.current.close(); } catch {}
       poseInstanceRef.current = null;
@@ -155,137 +89,47 @@ export default function PoseDetail() {
     if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
   };
 
-  const getPoint = (landmarks, def) => {
-    if (Array.isArray(def) && def[0] === 'mid') {
-      const i1 = def[1];
-      const i2 = def[2];
-      const p1 = landmarks[i1];
-      const p2 = landmarks[i2];
-      return { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-    } else {
-      const p = landmarks[def];
-      return { x: p.x, y: p.y };
-    }
-  };
-
-  const calculateAngle = (a, b, c) => {
-    const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-    let angle = Math.abs((radians * 180.0) / Math.PI);
-    if (angle > 180.0) angle = 360 - angle;
-    return angle;
-  };
-
-  const ANGLE_DEFINITIONS = {
-    hip_1: [12, 24, 26], hip_2: [12, 24, 23], hip_3: [23, 24, 26], hip_4: [11, 23, 25],
-    hip_5: [11, 23, 24], hip_6: [24, 23, 25], knee_1: [24, 26, 28], knee_2: [23, 25, 27],
-    ankle_1: [26, 28, 30], ankle_2: [26, 30, 32], ankle_3: [25, 27, 29], ankle_4: [25, 29, 31],
-    ankle_5: [26, ['mid', 24, 23], 25], ankle_6: [30, ['mid', 24, 23], 29],
-    arm_shoulder_1: [12, 14, 16], arm_shoulder_2: [12, 14, 18], arm_shoulder_3: [11, 13, 15], arm_shoulder_4: [11, 13, 17],
-    shoulder_1: [14, 12, 11], shoulder_2: [14, 12, 24], shoulder_3: [0, 12, 24],
-    shoulder_4: [['mid', 10, 9], 12, 24], shoulder_5: [13, 11, 12], shoulder_6: [13, 11, 23],
-    shoulder_7: [0, 11, 23], shoulder_8: [['mid', 10, 9], 11, 23], neck_1: [0, ['mid', 11, 12], ['mid', 23, 24]],
-    neck_2: [['mid', 10, 9], ['mid', 11, 12], ['mid', 23, 24]],
-  };
-
-  const SCORE_GROUPS = {
-    full_body: Object.keys(ANGLE_DEFINITIONS),
-    upper_body: ['arm_shoulder_1','arm_shoulder_2','arm_shoulder_3','arm_shoulder_4','shoulder_1','shoulder_2','shoulder_3','shoulder_4','shoulder_5','shoulder_6','shoulder_7','shoulder_8','neck_1','neck_2'],
-    lower_body: ['hip_1','hip_2','hip_3','hip_4','hip_5','hip_6','knee_1','knee_2','ankle_1','ankle_2','ankle_3','ankle_4','ankle_5','ankle_6'],
-  };
-
-  const cosineSimilarity = (A, B) => {
-    let dot = 0, normA = 0, normB = 0;
-    for (let i = 0; i < A.length; i++) {
-      const a = A[i] ?? 0; const b = B[i] ?? 0;
-      dot += a * b; normA += a * a; normB += b * b;
-    }
-    if (normA === 0 || normB === 0) return 0;
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-  };
-
-  const drawAndScore = (results, drawing, POSE_CONNECTIONS) => {
+  const onPoseResults = (results, drawing, POSE_CONNECTIONS) => {
     const canvasEl = canvasRef.current;
-    const videoEl = videoRef.current;
-    if (!canvasEl || !videoEl) return;
-
+    if (!canvasEl) return;
     const ctx = canvasEl.getContext('2d');
+    if (!ctx) return;
+
+    const videoEl = videoRef.current;
+    if (!videoEl || !videoEl.videoWidth) return;
     canvasEl.width = videoEl.videoWidth;
     canvasEl.height = videoEl.videoHeight;
-
-    ctx.save();
-    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-    ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
-
+    
+    drawPose(ctx, results, drawing, POSE_CONNECTIONS);
+    
+    let currentScores = scores;
     if (results.poseLandmarks) {
-      // draw landmarks
-      drawing.drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#22c55e', lineWidth: 4 });
-      drawing.drawLandmarks(ctx, results.poseLandmarks, { color: '#3b82f6', lineWidth: 2 });
-
       const now = performance.now() / 1000;
       const CHECK_INTERVAL = 0.25;
+      
       if (now - lastCheckRef.current > CHECK_INTERVAL && referenceDataRef.current) {
         lastCheckRef.current = now;
-        const lm = results.poseLandmarks;
-
-        // compute angles
-        const current = {};
-        for (const [k, def] of Object.entries(ANGLE_DEFINITIONS)) {
-          try {
-            const a = getPoint(lm, def[0]);
-            const b = getPoint(lm, def[1]);
-            const c = getPoint(lm, def[2]);
-            current[k] = calculateAngle(a, b, c);
-          } catch {
-            current[k] = -180;
-          }
-        }
-
-        const newScores = { full_body: 0, upper_body: 0, lower_body: 0 };
-        for (const [group, angleNames] of Object.entries(SCORE_GROUPS)) {
-          // build reference matrix
-          const refMatrix = referenceDataRef.current.map(row => angleNames.map(n => Number(row[n] ?? 0)));
-          const currVec = angleNames.map(n => Number(current[n] ?? 0));
-
-          // compute max cosine similarity
-          let maxCos = 0;
-          for (let i = 0; i < refMatrix.length; i++) {
-            const cs = cosineSimilarity(refMatrix[i], currVec);
-            if (cs > maxCos) maxCos = cs;
-          }
-          const oldPct = maxCos * 100;
-          const pct = Math.max(0, (oldPct - 90) * 10);
-          newScores[group] = Math.round(pct);
-        }
+        
+        const newScores = calculateScores(
+          results.poseLandmarks,
+          referenceDataRef.current
+        );
         setScores(newScores);
+        currentScores = newScores;
       }
     }
-
-    // HUD
-    let y = 28;
-    const entries = [
-      ['Full Body', scores.full_body],
-      ['Upper Body', scores.upper_body],
-      ['Lower Body', scores.lower_body],
-    ];
-    entries.forEach(([label, val]) => {
-      const text = `${label}: ${val}%`;
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(10, y - 18, ctx.measureText(text).width + 20, 24);
-      ctx.fillStyle = '#fff';
-      ctx.font = '16px sans-serif';
-      ctx.fillText(text, 20, y);
-      y += 28;
-    });
-
-    // FPS
+    
     const t = performance.now() / 1000;
-    const fpsNow = 1 / Math.max(1e-3, t - prevTimeRef.current);
+    const currentFps = 1 / Math.max(1e-3, t - prevTimeRef.current);
     prevTimeRef.current = t;
-    setFps(Math.round(fpsNow));
+    const roundedFps = Math.round(currentFps);
+    setFps(roundedFps);
 
-    ctx.restore();
+    // We still draw the HUD on the canvas as an overlay
+    drawHud(ctx, currentScores, roundedFps);
   };
 
+  // --- Render Logic ---
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -306,10 +150,7 @@ export default function PoseDetail() {
           </div>
           <h2 className="text-2xl font-semibold text-gray-900 mb-4">Pose Not Found</h2>
           <p className="text-gray-600 mb-8">{error}</p>
-          <Link 
-            href="/"
-            className="bg-gradient-to-r from-green-500 to-blue-500 text-white px-6 py-3 rounded-lg font-medium hover:from-green-600 hover:to-blue-600 transition-all duration-200 shadow-md hover:shadow-lg"
-          >
+          <Link href="/" className="bg-gradient-to-r from-green-500 to-blue-500 text-white px-6 py-3 rounded-lg font-medium hover:from-green-600 hover:to-blue-600 transition-all duration-200 shadow-md hover:shadow-lg">
             Back to Home
           </Link>
         </div>
@@ -318,120 +159,165 @@ export default function PoseDetail() {
   }
 
   if (!pose) return null;
-
+  
+  // --- Main JSX ---
   return (
     <div className="min-h-screen py-8">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-        {/* Back Button */}
-        <Link 
-          href="/"
-          className="inline-flex items-center text-gray-600 hover:text-green-600 mb-8 transition-colors"
-        >
+        
+        <Link href="/" className="inline-flex items-center text-gray-600 hover:text-green-600 mb-8 transition-colors">
           <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
           Back to All Poses
         </Link>
+        
+        <div className="grid grid-cols-1 lg:grid-cols-1 justify-center gap-12">
+          {isCoaching ? (
+            /* --- 💅 NEW PROFESSIONAL COACHING VIEW --- */
+            <>
+              {/* Left Column: Video and Controls */}
+              <div className="space-y-6">
+                <div>
+                  <h1 className="text-4xl font-bold text-gray-900 mb-2">{pose.name}</h1>
+                  <p className="text-2xl text-gray-600 italic">{pose.sanskritName}</p>
+                </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
-          {/* Image Section */}
-          <div className="space-y-6">
-            <div className="aspect-square relative overflow-hidden rounded-2xl shadow-2xl">
-              <Image
-                src={pose.image}
-                alt={pose.name}
-                fill
-                className="object-cover"
-                priority
-              />
-            </div>
+                <div className="relative aspect-video rounded-2xl shadow-2xl overflow-hidden bg-gray-900">
+                  <video 
+                    ref={videoRef} 
+                    className='absolute left-[50%] top-[50%] h-full min-h-full max-w-none transform -translate-x-[50%] -translate-y-[50%]'
+                    playsInline 
+                    muted 
+                  />
+                  <canvas 
+                    ref={canvasRef} 
+                    className="absolute left-[50%] top-[50%] h-full min-h-full max-w-none transform -translate-x-[50%] -translate-y-[50%]" 
+                  />
+                </div>
+                
+                <div className="text-center">
+                  <button
+                    onClick={stopCoaching}
+                    className="bg-gradient-to-r from-red-500 to-pink-500 text-white px-8 py-3 rounded-lg font-medium hover:from-red-600 hover:to-pink-600 transition-all duration-200 shadow-md hover:shadow-lg inline-flex items-center"
+                  >
+                    <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+                    </svg>
+                    Stop Practice
+                  </button>
+                </div>
+              </div>
+
+              {/* Right Column: Scores */}
+              <div className="space-y-8">
+                <h2 className="text-3xl font-bold text-gray-900">Real-time Feedback</h2>
+                
+                {/* Full Body Score */}
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h3 className="text-xl font-semibold text-gray-900 mb-4">Full Body Score</h3>
+                  <div className="text-center">
+                    <div className="inline-block relative">
+                      <span className="text-6xl font-bold text-green-600">{scores.full_body}</span>
+                      <span className="text-2xl font-bold text-green-600 align-top">%</span>
+                    </div>
+                    <p className="text-gray-600 mt-2">Overall form accuracy</p>
+                  </div>
+                </div>
+
+                {/* Upper/Lower Body Scores */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="bg-white rounded-xl shadow-lg p-6 text-center">
+                    <h4 className="text-lg font-semibold text-gray-900 mb-2">Upper Body</h4>
+                    <span className="text-4xl font-bold text-blue-600">{scores.upper_body}%</span>
+                  </div>
+                  <div className="bg-white rounded-xl shadow-lg p-6 text-center">
+                    <h4 className="text-lg font-semibold text-gray-900 mb-2">Lower Body</h4>
+                    <span className="text-4xl font-bold text-indigo-600">{scores.lower_body}%</span>
+                  </div>
+                </div>
+                
+                {/* Tip Box (Placeholder for actionable feedback) */}
+                <div className="bg-gradient-to-r from-green-50 to-blue-50 rounded-xl p-6 border border-green-200">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-3">Practice Tips</h3>
+                  <ul className="space-y-2 text-gray-700">
+                    <li className="flex items-start">
+                      <span className="text-green-500 mr-2">•</span>
+                      Keep your movements slow and controlled.
+                    </li>
+                    <li className="flex items-start">
+                      <span className="text-green-500 mr-2">•</span>
+                      Focus on your breathing throughout the pose.
+                    </li>
+                    <li className="flex items-start">
+                      <span className="text-green-500 mr-2">•</span>
+                      The scores on the video show a live overlay.
+                    </li>
+                  </ul>
+                </div>
+
+              </div>
+            </>
             
-            {/* CSV Download */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Additional Resources</h3>
-              <a
-                href={`/csv/${pose.csvFileName}`}
-                download
-                className="inline-flex items-center bg-gradient-to-r from-green-500 to-blue-500 text-white px-6 py-3 rounded-lg font-medium hover:from-green-600 hover:to-blue-600 transition-all duration-200 shadow-md hover:shadow-lg"
-              >
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Download CSV Guide
-              </a>
+          ) : (
 
-              <div className="mt-4">
-                <Link
-                  href={`/compare/${encodeURIComponent(pose.name)}`}
-                  className="inline-flex items-center bg-gradient-to-r from-purple-500 to-indigo-500 text-white px-6 py-3 rounded-lg font-medium hover:from-purple-600 hover:to-indigo-600 transition-all duration-200 shadow-md hover:shadow-lg"
-                >
-                  <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7H7m6 10H7m10-5H7" />
-                  </svg>
-                  Make your pose perfect
-                </Link>
+            /* --- DETAILS VIEW --- */
+            <>
+              {/* Left Column: Image and Practice Button */}
+              <div className="space-y-6">
+                <div className="aspect-square relative overflow-hidden rounded-2xl shadow-2xl">
+                  <Image
+                    src={pose.image}
+                    alt={pose.name}
+                    fill
+                    className="object-cover"
+                    priority
+                  />
+                </div>
+                
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4">Ready to Practice?</h3>
+                  <button
+                    onClick={startCoaching}
+                    className="inline-flex items-center justify-center bg-gradient-to-r from-purple-500 to-indigo-500 text-white px-6 py-3 rounded-lg font-medium hover:from-purple-600 hover:to-indigo-600 transition-all duration-200 shadow-md hover:shadow-lg w-full"
+                  >
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M4 18h11a1 1 0 001-1V7a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1z" />
+                    </svg>
+                    Make your pose perfect
+                  </button>
+                </div>
               </div>
-            </div>
 
-          </div>
+              {/* Right Column: Pose Details */}
+              <div className="space-y-8">
+                <div>
+                  <h1 className="text-4xl font-bold text-gray-900 mb-2">{pose.name}</h1>
+                  <p className="text-2xl text-gray-600 italic">{pose.sanskritName}</p>
+                </div>
 
-          {/* Details Section */}
-          <div className="space-y-8">
-            {/* Header */}
-            <div>
-              <h1 className="text-4xl font-bold text-gray-900 mb-2">{pose.name}</h1>
-              <p className="text-2xl text-gray-600 italic">{pose.sanskritName}</p>
-            </div>
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h2 className="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
+                    <span className="text-green-600 mr-3">✨</span>
+                    Benefits
+                  </h2>
+                  <div className="prose prose-gray max-w-none">
+                    <div className="text-gray-700 leading-relaxed whitespace-pre-line">{pose.benefits}</div>
+                  </div>
+                </div>
 
-            {/* Benefits */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
-                <span className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center mr-3">
-                  <span className="text-green-600">✨</span>
-                </span>
-                Benefits
-              </h2>
-              <div className="prose prose-gray max-w-none">
-                <div className="text-gray-700 leading-relaxed whitespace-pre-line">{pose.benefits}</div>
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h2 className="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
+                    <span className="text-blue-600 mr-3">📋</span>
+                    Step-by-Step Instructions
+                  </h2>
+                  <div className="prose prose-gray max-w-none">
+                    <div className="text-gray-700 leading-relaxed whitespace-pre-line">{pose.instructions}</div>
+                  </div>
+                </div>
               </div>
-            </div>
-
-            {/* Instructions */}
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
-                <span className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mr-3">
-                  <span className="text-blue-600">📋</span>
-                </span>
-                Step-by-Step Instructions
-              </h2>
-              <div className="prose prose-gray max-w-none">
-                <div className="text-gray-700 leading-relaxed whitespace-pre-line">{pose.instructions}</div>
-              </div>
-            </div>
-
-            {/* Practice Tips */}
-            <div className="bg-gradient-to-r from-green-50 to-blue-50 rounded-xl p-6 border border-green-200">
-              <h3 className="text-lg font-semibold text-gray-900 mb-3">Practice Tips</h3>
-              <ul className="space-y-2 text-gray-700">
-                <li className="flex items-start">
-                  <span className="text-green-500 mr-2">•</span>
-                  Hold each pose for 30 seconds to 2 minutes, depending on your level
-                </li>
-                <li className="flex items-start">
-                  <span className="text-green-500 mr-2">•</span>
-                  Focus on your breathing throughout the pose
-                </li>
-                <li className="flex items-start">
-                  <span className="text-green-500 mr-2">•</span>
-                  Listen to your body and don't force any position
-                </li>
-                <li className="flex items-start">
-                  <span className="text-green-500 mr-2">•</span>
-                  Practice regularly for best results
-                </li>
-              </ul>
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </div>
     </div>

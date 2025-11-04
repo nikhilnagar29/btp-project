@@ -65,9 +65,6 @@ export default function AdminPage() {
       // Then create the pose
       const response = await fetch('/api/poses', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: fullFormData,
       });
 
