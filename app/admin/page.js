@@ -44,19 +44,22 @@ export default function AdminPage() {
     setMessage('');
 
     try {
-      // First upload CSV file if provided
+      // We will send everything in one FormData object
+      const fullFormData = new FormData();
+      
+      // Append all text fields
+      fullFormData.append('name', formData.name);
+      fullFormData.append('sanskritName', formData.sanskritName);
+      fullFormData.append('image', formData.image);
+      fullFormData.append('benefits', formData.benefits);
+      fullFormData.append('instructions', formData.instructions);
+
+      // Append the file if it exists
       if (csvFile) {
-        const formDataFile = new FormData();
-        formDataFile.append('file', csvFile);
-        
-        const uploadResponse = await fetch('/api/upload', {
-          method: 'POST',
-          body: formDataFile
-        });
-        
-        if (!uploadResponse.ok) {
-          throw new Error('Failed to upload CSV file');
-        }
+        fullFormData.append('file', csvFile);
+      } else {
+        // You might want to make the CSV required
+        throw new Error('CSV file is required');
       }
 
       // Then create the pose
@@ -65,11 +68,11 @@ export default function AdminPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(formData),
+        body: fullFormData,
       });
 
       if (response.ok) {
-        setMessage('Yoga pose added successfully!');
+        setMessage('Yoga pose and CSV data added successfully!');
         setFormData({
           name: '',
           sanskritName: '',

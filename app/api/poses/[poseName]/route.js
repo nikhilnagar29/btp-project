@@ -7,7 +7,7 @@ export async function GET(request, { params }) {
     await connectDB();
     const { poseName } = await params;
     
-    const pose = await YogaPose.findOne({ name: poseName });
+    const pose = await YogaPose.findOne({ name: poseName }).select('-csvData');
     
     if (!pose) {
       return NextResponse.json({ error: 'Pose not found' }, { status: 404 });

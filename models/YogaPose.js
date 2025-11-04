@@ -28,6 +28,12 @@ const YogaPoseSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // --- ADD THIS NEW FIELD ---
+  csvData: {
+    type: String,
+    required: true
+  },
+  // --- END OF NEW FIELD ---
   createdAt: {
     type: Date,
     default: Date.now

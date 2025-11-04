@@ -7,12 +7,14 @@ import Papa from 'papaparse';
 export default function ComparePage() {
   const params = useParams();
   const router = useRouter();
+  // ... (keep existing state variables)
   const [error, setError] = useState(null);
   const [poseName, setPoseName] = useState('');
   const [scores, setScores] = useState({ full_body: 0, upper_body: 0, lower_body: 0 });
   const [fps, setFps] = useState(0);
   const [status, setStatus] = useState('Initializing...');
 
+  // ... (keep existing refs)
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const poseInstanceRef = useRef(null);
@@ -22,7 +24,9 @@ export default function ComparePage() {
   const prevTimeRef = useRef(0);
   const isActiveRef = useRef(true);
 
+
   useEffect(() => {
+    // ... (no changes needed in useEffect)
     isActiveRef.current = true;
     const name = decodeURIComponent(params.poseName || '');
     setPoseName(name);
@@ -40,51 +44,105 @@ export default function ComparePage() {
       cleanup();
       isActiveRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.poseName]);
 
-  const fetchPoseMeta = async (name) => {
-    const res = await fetch(`/api/poses/${encodeURIComponent(name)}`);
-    if (!res.ok) throw new Error('Pose not found');
+  // --- NEW FUNCTION TO FETCH FULL DATA ---
+  const fetchFullPoseData = async (name) => {
+    const res = await fetch(`/api/poses/${encodeURIComponent(name)}/full`);
+    if (!res.ok) throw new Error('Full pose data not found');
     return res.json();
   };
-
-  const parseCsvFlexible = (url) => new Promise((resolve, reject) => {
-    // First try header=true
-    Papa.parse(url, {
-      download: true,
+  
+  // --- NEW FUNCTION TO PARSE STRING DATA ---
+  const parseCsvFromString = (csvString) => new Promise((resolve, reject) => {
+    Papa.parse(csvString, {
       header: true,
       dynamicTyping: true,
       skipEmptyLines: true,
       complete: (results) => {
         if (results.errors && results.errors.length) {
-          // Fallback to headerless parse
-          Papa.parse(url, {
-            download: true,
-            header: false,
-            dynamicTyping: true,
-            skipEmptyLines: true,
-            complete: (results2) => {
-              if (results2.errors && results2.errors.length) return reject(results2.errors[0]);
-              const rows2 = results2.data;
-              if (!Array.isArray(rows2) || rows2.length === 0) return reject(new Error('CSV has no rows'));
-              const first = rows2[0];
-              const expectedLen = SCORE_GROUPS.full_body.length;
-              if (first.length !== expectedLen) return reject(new Error(`CSV row length ${first.length} != expected ${expectedLen}`));
-              const keys = SCORE_GROUPS.full_body;
-              const mapped = rows2.map(arr => Object.fromEntries(arr.map((v, i) => [keys[i], v])));
-              resolve(mapped);
-            },
-            error: (e2) => reject(e2),
-          });
-        } else {
-          resolve(results.data);
+          return reject(results.errors[0]);
         }
+        resolve(results.data);
       },
       error: (err) => reject(err),
     });
   });
 
+  const init = async (name) => {
+    setStatus('Loading pose data...');
+    try {
+      // 1. Fetch the full data (including csvData string)
+      const fullPoseData = await fetchFullPoseData(name);
+      
+      setStatus('Parsing CSV data...');
+      // 2. Parse the csvData string directly
+      const rows = await parseCsvFromString(fullPoseData.csvData);
+
+      // ... (The rest of your init function remains largely the same)
+      const required = SCORE_GROUPS.full_body;
+      const header = Object.keys(rows[0] || {});
+      const missing = required.filter(k => !header.includes(k));
+      if (missing.length) throw new Error(`CSV missing columns: ${missing.slice(0,5).join(', ')}${missing.length>5?'...':''}`);
+      referenceDataRef.current = rows;
+
+      // Camera permissions and setup
+      if (!window.isSecureContext && location.hostname !== 'localhost') {
+        throw new Error('Camera requires HTTPS or localhost. Please use https or run locally.');
+      }
+      
+      // ... (the rest of the function is the same, no changes needed for camera/mediapipe setup)
+      if (videoRef.current) {
+        videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('muted', 'true');
+        videoRef.current.muted = true;
+        videoRef.current.autoplay = true;
+      }
+
+      setStatus('Requesting camera...');
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+      } catch (e1) {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+      if (!isActiveRef.current) return; // aborted
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try { await videoRef.current.play(); } catch {}
+      }
+
+      setStatus('Loading model...');
+      const [poseMod, drawing, camUtils] = await Promise.all([
+        import('@mediapipe/pose'),
+        import('@mediapipe/drawing_utils'),
+        import('@mediapipe/camera_utils'),
+      ]);
+      if (!isActiveRef.current) return;
+      const { Pose, POSE_CONNECTIONS } = poseMod;
+
+      const poseInstance = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
+      poseInstance.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+      poseInstance.onResults((results) => { if (!isActiveRef.current) return; drawAndScore(results, drawing, POSE_CONNECTIONS); });
+      poseInstanceRef.current = poseInstance;
+
+      const camera = new camUtils.Camera(videoRef.current, {
+        onFrame: async () => { if (!isActiveRef.current) return; await poseInstance.send({ image: videoRef.current }); },
+        width: 640,
+        height: 480,
+      });
+      cameraRef.current = camera;
+      camera.start();
+      setStatus('Live');
+
+    } catch (e) {
+      console.error('Compare init failed', e);
+      setError(e.message || 'Initialization failed');
+      setStatus('Error');
+    }
+  };
+
+  // ... (keep all other functions like cleanup, drawAndScore, ANGLE_DEFINITIONS, etc. They don't need to change)
   const ANGLE_DEFINITIONS = {
     hip_1: [12, 24, 26], hip_2: [12, 24, 23], hip_3: [23, 24, 26], hip_4: [11, 23, 25],
     hip_5: [11, 23, 24], hip_6: [24, 23, 25], knee_1: [24, 26, 28], knee_2: [23, 25, 27],
@@ -130,75 +188,6 @@ export default function ComparePage() {
     if (angle > 180.0) angle = 360 - angle;
     return angle;
   };
-
-  const init = async (name) => {
-    setStatus('Loading pose...');
-    try {
-      const meta = await fetchPoseMeta(name);
-      setStatus('Loading CSV...');
-      const rows = await parseCsvFlexible(`/csv/${meta.csvFileName}`);
-
-      // Validate columns
-      const required = SCORE_GROUPS.full_body;
-      const header = Object.keys(rows[0] || {});
-      const missing = required.filter(k => !header.includes(k));
-      if (missing.length) throw new Error(`CSV missing columns: ${missing.slice(0,5).join(', ')}${missing.length>5?'...':''}`);
-      referenceDataRef.current = rows;
-
-      // Camera permissions and setup
-      if (!window.isSecureContext && location.hostname !== 'localhost') {
-        throw new Error('Camera requires HTTPS or localhost. Please use https or run locally.');
-      }
-
-      if (videoRef.current) {
-        videoRef.current.setAttribute('playsinline', 'true');
-        videoRef.current.setAttribute('muted', 'true');
-        videoRef.current.muted = true;
-        videoRef.current.autoplay = true;
-      }
-
-      setStatus('Requesting camera...');
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
-      } catch (e1) {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      }
-      if (!isActiveRef.current) return; // aborted
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        try { await videoRef.current.play(); } catch {}
-      }
-
-      setStatus('Loading model...');
-      const [poseMod, drawing, camUtils] = await Promise.all([
-        import('@mediapipe/pose'),
-        import('@mediapipe/drawing_utils'),
-        import('@mediapipe/camera_utils'),
-      ]);
-      if (!isActiveRef.current) return;
-      const { Pose, POSE_CONNECTIONS } = poseMod;
-
-      const poseInstance = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
-      poseInstance.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-      poseInstance.onResults((results) => { if (!isActiveRef.current) return; drawAndScore(results, drawing, POSE_CONNECTIONS); });
-      poseInstanceRef.current = poseInstance;
-
-      const camera = new camUtils.Camera(videoRef.current, {
-        onFrame: async () => { if (!isActiveRef.current) return; await poseInstance.send({ image: videoRef.current }); },
-        width: 640,
-        height: 480,
-      });
-      cameraRef.current = camera;
-      camera.start();
-      setStatus('Live');
-    } catch (e) {
-      console.error('Compare init failed', e);
-      setError(e.message || 'Initialization failed');
-      setStatus('Error');
-    }
-  };
-
   const cleanup = () => {
     isActiveRef.current = false;
     try { cameraRef.current?.stop?.(); } catch {}
@@ -260,6 +249,7 @@ export default function ComparePage() {
     const t = performance.now() / 1000; const fpsNow = 1 / Math.max(1e-3, t - prevTimeRef.current); prevTimeRef.current = t; setFps(Math.round(fpsNow)); ctx.restore();
   };
 
+  // ... (Your JSX rendering part is fine, no changes needed)
   return (
     <div className="min-h-screen py-8">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
