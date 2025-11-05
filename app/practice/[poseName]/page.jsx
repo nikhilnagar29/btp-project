@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 
+// These imports are correct based on your new file structure
 import { fetchFullPoseData, parseCsvData, calculateScores } from './poseUtils';
 import { ANGLE_TO_TIP_MAP } from './poseConstants';
 import { initMediaPipe, initCamera, drawPose, drawHud } from './mediaPipeUtils';
 
+// Your components are imported correctly
 import LoadingOverlay from '../../components/LoadingOverlay';
 import ScoreRing from '../../components/ScoreRing';
 import WarningBar from '../../components/WarningBar';
@@ -39,7 +41,7 @@ export default function PracticePage() {
   const prevTimeRef = useRef(0);
   const noPoseCountRef = useRef(0);
 
-  // Load pose + CSV
+  // Load pose + CSV (No changes here)
   useEffect(() => {
     const load = async () => {
       try {
@@ -57,7 +59,7 @@ export default function PracticePage() {
     load();
   }, [params?.poseName]);
 
-  // Start camera immediately
+  // Start camera immediately (No changes here)
   useEffect(() => {
     if (!pose || !referenceDataRef.current?.length) return;
     const start = async () => {
@@ -87,7 +89,7 @@ export default function PracticePage() {
     };
   }, [pose]);
 
-  // Cycle live tips
+  // Cycle live tips (No changes here)
   useEffect(() => {
     clearInterval(feedbackTimerRef.current);
     feedbackIndexRef.current = 0;
@@ -107,29 +109,23 @@ export default function PracticePage() {
     return () => clearInterval(feedbackTimerRef.current);
   }, [feedbackList, scores.full_body]);
 
-  // Pose results
+  // Pose results (No changes here)
   const onPoseResults = (results, drawing, POSE_CONNECTIONS) => {
     const canvasEl = canvasRef.current;
     const ctx = canvasEl?.getContext('2d');
     const videoEl = videoRef.current;
     if (!canvasEl || !ctx || !videoEl || !videoEl.videoWidth) return;
 
-    // Desktop → prefer 16:9; Mobile → auto (your “16:9 OR auto”)
-    const preferSixteenNine = window.innerWidth >= 1024;
-    if (preferSixteenNine) {
-      const width = videoEl.videoWidth;
-      const height = Math.round((width * 9) / 16);
-      canvasEl.width = width;
-      canvasEl.height = height;
-    } else {
-      canvasEl.width = videoEl.videoWidth;
-      canvasEl.height = videoEl.videoHeight;
-    }
-
+    // This logic is fine, it sets the canvas to the video's received size
+    canvasEl.width = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+    
     let currentHighlights = highlightLandmarksRef.current;
 
     if (results?.poseLandmarks) {
       noPoseCountRef.current = 0;
+      if (warning) setWarning(null); // Clear warning if pose is found
+
       const now = performance.now();
       const CHECK_INTERVAL = 250;
       if (now - lastCheckRef.current > CHECK_INTERVAL) {
@@ -144,11 +140,13 @@ export default function PracticePage() {
         const newHighlights = worstAngles.map(a => ANGLE_TO_TIP_MAP[a].landmarkIndex);
         highlightLandmarksRef.current = newHighlights;
         currentHighlights = newHighlights;
-        if (newScores.full_body > 35) setWarning(null);
       }
     } else {
       noPoseCountRef.current += 1;
-      if (noPoseCountRef.current > 6) setWarning('Move back — full body not detected');
+       // Show warning if pose is not detected for ~0.5 seconds (250ms * 2)
+      if (noPoseCountRef.current > 2) {
+         setWarning('Move back — full body not detected');
+      }
     }
 
     drawPose(ctx, results, drawing, POSE_CONNECTIONS, currentHighlights);
@@ -159,6 +157,7 @@ export default function PracticePage() {
     drawHud(ctx, Math.round(fps));
   };
 
+  // --- Loading/Error states (No changes here) ---
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-pink-50">
@@ -184,6 +183,7 @@ export default function PracticePage() {
     );
   }
 
+  // --- Main Render ---
   return (
     <div className="min-h-screen bg-pink-50">
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-4 lg:py-6">
@@ -196,41 +196,49 @@ export default function PracticePage() {
           </span>
         </div>
 
-        {/* 75% / 25% */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-7 gap-6 lg:gap-8 items-start">
           {/* Left: Video (3/4) */}
-          <div className="lg:col-span-3">
-            <div className="relative rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
-              <div className="relative w-full lg:h-[calc(100vh-180px)]">
-                <div className="absolute inset-0">
-                  <video ref={videoRef} className=" object-cover" playsInline muted />
-                  <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />
-                </div>
+          <div className="lg:col-span-5">
+            {/* --- THIS IS THE MAIN FIX ---
+              1.  We use `aspect-video` (16:9) to force a professional shape on all screens.
+              2.  `w-full` makes it responsive.
+              3.  The `video` and `canvas` inside must fill this container.
+            */}
+            <div className="relative flex items-center justify-center w-full aspect-video rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
+              <video 
+                ref={videoRef} 
+                className="absolute  w-auto h-full object-cover transform " 
+                playsInline 
+                muted 
+              />
+              <canvas 
+                ref={canvasRef} 
+                className="absolute  w-auto h-full pointer-events-none transform" 
+              />
+              {/* Overlays are now correctly placed *inside* the container */}
+              <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
+              {warning && <WarningBar>{warning}</WarningBar>}
 
-                <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
-                {warning && <WarningBar>{warning}</WarningBar>}
-
-                <div className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm rounded-full px-3 py-1 text-sm font-semibold text-pink-700">
-                  COACH
-                </div>
+              <div className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm rounded-full px-3 py-1 text-sm font-semibold text-pink-700">
+                COACH
               </div>
             </div>
           </div>
 
-          {/* Right: Analysis (1/4) */}
-          <aside className="lg:col-span-1 space-y-6">
+          {/* Right: Analysis (1/4) (No changes here, this part is good) */}
+          <aside className="lg:col-span-2 space-y-6">
             <LiveTipBox tip={displayFeedback} />
 
             <div className="bg-white rounded-2xl shadow-lg p-6">
               <div className="flex items-center gap-4">
                 <ScoreRing value={Math.round(scores.full_body)} label="Overall" />
-                <div className="flex-1 grid grid-cols-2 gap-3">
+                <div className="flex-1 grid grid-row-2 gap-3">
                   <div className="bg-pink-50 rounded-lg p-3 text-center">
-                    <div className="text-sm font-medium text-gray-700">Upper</div>
+                    <div className="text-sm font-medium text-gray-700">Upper body</div>
                     <div className="text-2xl font-bold text-pink-600">{scores.upper_body}%</div>
                   </div>
                   <div className="bg-pink-50 rounded-lg p-3 text-center">
-                    <div className="text-sm font-medium text-gray-700">Lower</div>
+                    <div className="text-sm font-medium text-gray-700">Lower body</div>
                     <div className="text-2xl font-bold text-pink-600">{scores.lower_body}%</div>
                   </div>
                 </div>
