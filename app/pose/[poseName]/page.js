@@ -87,8 +87,17 @@ export default function PoseDetailsPage() {
           <div className="bg-gradient-to-br from-white to-pink-50 rounded-2xl shadow-xl overflow-hidden border border-white/70">
             <div className="relative w-full">
               {/* Keep natural ratio: remove forced square. Use responsive container. */}
-              <div className="relative w-full" style={{ aspectRatio: '4 / 5' }}>
-                <img src={pose.image} alt={pose.name} fill className="object-cover" priority />
+              <div className="relative w-full" 
+              // style={{ aspectRatio: '4 / 5' }}
+              >
+                <div className="relative w-full aspect-square overflow-hidden rounded-2xl">
+                  <img
+                    src={pose.image}
+                    alt={pose.name}
+                    className=" h-full object-cover transition-transform duration-300 group-hover:scale-110"
+                  />
+                  <div className="absolute inset-0 bg-black/10 group-hover:bg-black/30 transition-all"></div>
+                </div>
               </div>
             </div>
           </div>
