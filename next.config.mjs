@@ -32,6 +32,10 @@ const nextConfig = {
         port: '',
         pathname: '/**',
       },
+      {
+        protocol: 'https',
+        hostname: 'example.com', // add more domains here if needed
+      },
     ],
   },
 };
