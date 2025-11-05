@@ -86,7 +86,7 @@ export default function Home() {
                 >
                   <div className="bg-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden group-hover:scale-105">
                     <div className="aspect-square relative overflow-hidden">
-                      <Image
+                      <img
                         src={pose.image}
                         alt={pose.name}
                         fill

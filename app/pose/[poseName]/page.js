@@ -88,7 +88,7 @@ export default function PoseDetailsPage() {
             <div className="relative w-full">
               {/* Keep natural ratio: remove forced square. Use responsive container. */}
               <div className="relative w-full" style={{ aspectRatio: '4 / 5' }}>
-                <Image src={pose.image} alt={pose.name} fill className="object-cover" priority />
+                <img src={pose.image} alt={pose.name} fill className="object-cover" priority />
               </div>
             </div>
           </div>
