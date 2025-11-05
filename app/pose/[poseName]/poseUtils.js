@@ -1,6 +1,6 @@
 // app/pose/[poseName]/poseUtils.js
 import Papa from 'papaparse';
-import { ANGLE_DEFINITIONS, SCORE_GROUPS } from './poseConstants';
+import { ANGLE_DEFINITIONS, SCORE_GROUPS , ANGLE_TO_TIP_MAP } from './poseConstants';
 
 /**
  * Fetches the full pose data (metadata + csvData) from the API.
@@ -77,25 +77,49 @@ export const calculateScores = (landmarks, referenceData) => {
       const c = getPoint(landmarks, def[2]);
       currentAngles[k] = calculateAngle(a, b, c);
     } catch {
-      currentAngles[k] = -180; // Error value
+      currentAngles[k] = -180;
     }
   }
 
   const newScores = { full_body: 0, upper_body: 0, lower_body: 0 };
+  let worstAngles = [];
+
   for (const [group, angleNames] of Object.entries(SCORE_GROUPS)) {
     const refMatrix = referenceData.map(row => angleNames.map(n => Number(row[n] ?? 0)));
     const currVec = angleNames.map(n => Number(currentAngles[n] ?? 0));
     
     let maxCos = 0;
+    let bestMatchIndex = 0;
+
     for (let i = 0; i < refMatrix.length; i++) {
       const cs = cosineSimilarity(refMatrix[i], currVec);
-      if (cs > maxCos) maxCos = cs;
+      if (cs > maxCos) {
+        maxCos = cs;
+        bestMatchIndex = i;
+      }
     }
     
-    // Remap score: 90% similarity = 0, 100% similarity = 100
     const oldPct = maxCos * 100;
     const pct = Math.max(0, (oldPct - 90) * 10);
     newScores[group] = Math.round(pct);
+
+    if (group === 'full_body' && refMatrix.length > 0) {
+      const bestMatchVector = refMatrix[bestMatchIndex];
+      const errors = [];
+      for (let i = 0; i < angleNames.length; i++) {
+        const angleName = angleNames[i];
+        if (ANGLE_TO_TIP_MAP[angleName]) {
+          const error = Math.abs(currVec[i] - bestMatchVector[i]);
+          if (error > 15) { // Error threshold of 15 degrees
+            errors.push({ name: angleName, error: error });
+          }
+        }
+      }
+      // Sort by the biggest error and take the top 3
+      errors.sort((a, b) => b.error - a.error);
+      worstAngles = errors.slice(0, 3).map(e => e.name);
+    }
   }
-  return newScores;
+  
+  return { scores: newScores, worstAngles: worstAngles };
 };

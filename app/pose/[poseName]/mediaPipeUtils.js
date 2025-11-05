@@ -73,7 +73,16 @@ export const initCamera = async (videoRef, poseInstance) => {
 /**
  * Draws the pose landmarks and connectors on the canvas.
  */
-export const drawPose = (ctx, results, drawing, POSE_CONNECTIONS) => {
+
+
+/**
+ * Draws the scores and FPS text overlay (HUD).
+ */
+/**
+ * Draws the pose landmarks and connectors on the canvas.
+ * NOW ACCEPTS a landmark to highlight in red.
+ */
+export const drawPose = (ctx, results, drawing, POSE_CONNECTIONS, highlightLandmarks = []) => {
   ctx.save();
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   ctx.drawImage(results.image, 0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -82,6 +91,25 @@ export const drawPose = (ctx, results, drawing, POSE_CONNECTIONS) => {
     try {
       drawing.drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#22c55e', lineWidth: 4 });
       drawing.drawLandmarks(ctx, results.poseLandmarks, { color: '#3b82f6', lineWidth: 2 });
+
+      // --- NEW: Loop through landmarks to highlight ---
+      if (highlightLandmarks && highlightLandmarks.length > 0) {
+        for (const landmarkIndex of highlightLandmarks) {
+          if (results.poseLandmarks[landmarkIndex] && results.poseLandmarks[landmarkIndex].visibility > 0.5) {
+            const landmark = results.poseLandmarks[landmarkIndex];
+            const x = landmark.x * ctx.canvas.width;
+            const y = landmark.y * ctx.canvas.height;
+            
+            ctx.beginPath();
+            ctx.arc(x, y, 10, 0, 2 * Math.PI);
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.7)';
+            ctx.fill();
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+        }
+      }
     } catch (e) {
       console.error('Error drawing pose:', e);
     }
@@ -89,33 +117,14 @@ export const drawPose = (ctx, results, drawing, POSE_CONNECTIONS) => {
 };
 
 /**
- * Draws the scores and FPS text overlay (HUD).
+ * Draws just the FPS text overlay (HUD).
  */
-export const drawHud = (ctx, scores, fps) => {
-  let y = 28;
-  const entries = [
-    ['Full Body', scores.full_body],
-    ['Upper Body', scores.upper_body],
-    ['Lower Body', scores.lower_body],
-  ];
-
+export const drawHud = (ctx, fps) => {
+  const fpsText = `FPS: ${fps}`;
   ctx.fillStyle = 'rgba(0,0,0,0.4)';
   ctx.font = '16px sans-serif';
-
-  entries.forEach(([label, val]) => {
-    const text = `${label}: ${val}%`;
-    ctx.fillRect(10, y - 18, ctx.measureText(text).width + 20, 24);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(text, 20, y);
-    y += 28;
-    ctx.fillStyle = 'rgba(0,0,0,0.4)'; // Reset color for next rect
-  });
-  
-  // Draw FPS
-  const fpsText = `FPS: ${fps}`;
-  ctx.fillRect(10, y - 18, ctx.measureText(fpsText).width + 20, 24);
+  ctx.fillRect(10, 10, ctx.measureText(fpsText).width + 20, 24); // Position at top-left
   ctx.fillStyle = '#fff';
-  ctx.fillText(fpsText, 20, y);
-  
+  ctx.fillText(fpsText, 20, 28);
   ctx.restore();
 };
