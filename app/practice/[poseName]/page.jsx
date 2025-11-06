@@ -7,7 +7,7 @@ import { useParams, useRouter } from 'next/navigation';
 // These imports are correct based on your new file structure
 import { fetchFullPoseData, parseCsvData, calculateScores } from './poseUtils';
 import { ANGLE_TO_TIP_MAP } from './poseConstants';
-import { initMediaPipe, initCamera, drawPose, drawHud } from './mediaPipeUtils';
+import { initMediaPipe, initCamera, drawPose, drawHud, hasMultipleCameras } from './mediaPipeUtils';
 
 // Your components are imported correctly
 import LoadingOverlay from '../../components/LoadingOverlay';
@@ -28,6 +28,10 @@ export default function PracticePage() {
   const [feedbackList, setFeedbackList] = useState([]);
   const [displayFeedback, setDisplayFeedback] = useState('Hold pose to get feedback.');
   const [warning, setWarning] = useState(null);
+
+  // --- 2. ADD NEW STATE for camera ---
+  const [facingMode, setFacingMode] = useState('user'); // 'user' (front) or 'environment' (rear)
+  const [canFlipCamera, setCanFlipCamera] = useState(false);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -59,13 +63,54 @@ export default function PracticePage() {
     load();
   }, [params?.poseName]);
 
+  // --- 3. REFACTOR camera start logic ---
+  
+  // This effect initializes MediaPipe (once)
+  useEffect(() => {
+    const initPose = async () => {
+      try {
+        poseInstanceRef.current = await initMediaPipe(onPoseResults);
+      } catch (e) {
+        console.error('Failed to init MediaPipe', e);
+        setWarning('Failed to load pose detection model.');
+      }
+    };
+    initPose();
+  
+    return () => {
+      try { poseInstanceRef.current?.close?.(); } catch {}
+      poseInstanceRef.current = null;
+    };
+  }, []); // Runs once
+
   // Start camera immediately (No changes here)
   useEffect(() => {
     if (!pose || !referenceDataRef.current?.length) return;
-    const start = async () => {
+
+
+    // Function to start the camera
+    const startCamera = async () => {
+      setIsCameraStarting(true);
+      
+      // --- Cleanup previous camera first ---
+      try { cameraRef.current?.stop?.(); } catch {}
+      cameraRef.current = null;
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(t => t.stop());
+        videoRef.current.srcObject = null;
+      }
+      // --- End cleanup ---
+
       try {
-        poseInstanceRef.current = await initMediaPipe(onPoseResults);
-        cameraRef.current = await initCamera(videoRef, poseInstanceRef.current);
+        // Check for multi-camera support (only check once)
+        if (!canFlipCamera) { 
+          const multipleCams = await hasMultipleCameras();
+          setCanFlipCamera(multipleCams);
+        }
+
+        // Pass the current facingMode to initCamera
+        cameraRef.current = await initCamera(videoRef, poseInstanceRef.current, facingMode);
+        
         setFeedbackList(['Hold your pose to get real-time feedback.']);
       } catch (err) {
         console.error('Camera error', err);
@@ -74,7 +119,8 @@ export default function PracticePage() {
         setIsCameraStarting(false);
       }
     };
-    start();
+
+    startCamera();
 
     return () => {
       try { cameraRef.current?.stop?.(); } catch {}
@@ -87,7 +133,7 @@ export default function PracticePage() {
       }
       clearInterval(feedbackTimerRef.current);
     };
-  }, [pose]);
+  }, [pose, facingMode, poseInstanceRef.current]);
 
   // Cycle live tips (No changes here)
   useEffect(() => {
@@ -157,6 +203,12 @@ export default function PracticePage() {
     drawHud(ctx, Math.round(fps));
   };
 
+  // --- 4. ADD NEW Handler for flipping camera ---
+  const handleFlipCamera = () => {
+    if (!canFlipCamera || isCameraStarting) return;
+    setFacingMode(prevMode => (prevMode === 'user' ? 'environment' : 'user'));
+  };
+
   // --- Loading/Error states (No changes here) ---
   if (loading) {
     return (
@@ -204,25 +256,28 @@ export default function PracticePage() {
               2.  `w-full` makes it responsive.
               3.  The `video` and `canvas` inside must fill this container.
             */}
-            <div className="relative flex items-center justify-center w-full aspect-video rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
-              <video 
-                ref={videoRef} 
-                className="absolute  w-auto h-full object-cover transform " 
-                playsInline 
-                muted 
-              />
-              <canvas 
-                ref={canvasRef} 
-                className="absolute  w-auto h-full pointer-events-none transform" 
-              />
-              {/* Overlays are now correctly placed *inside* the container */}
-              <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
-              {warning && <WarningBar>{warning}</WarningBar>}
+                <div className="relative w-full rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
+            {/* Video element is NOT absolute. It will size naturally based on the stream. */}
+            <video 
+              ref={videoRef} 
+              className="w-full h-auto"  /* Key change here */
+              playsInline 
+              muted 
+            />
+            {/* Canvas is absolute, stretching to fill the parent container (which is sized by the video). */}
+            <canvas 
+              ref={canvasRef} 
+              className="absolute top-0 left-0 w-full h-full pointer-events-none" 
+            />
+            
+            {/* Overlays are still absolute, covering the container */}
+            <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
+            {warning && <WarningBar>{warning}</WarningBar>}
 
-              <div className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm rounded-full px-3 py-1 text-sm font-semibold text-pink-700">
-                COACH
-              </div>
-            </div>
+            
+          </div>
+
+
           </div>
 
           {/* Right: Analysis (1/4) (No changes here, this part is good) */}
@@ -254,6 +309,22 @@ export default function PracticePage() {
                 >
                   Stop
                 </button>
+
+                {/* --- ADD THIS BUTTON --- */}
+                {canFlipCamera && (
+                  <button
+                    onClick={handleFlipCamera}
+                    disabled={isCameraStarting}
+                    title="Flip Camera"
+                    className="p-2 inline-flex items-center justify-center bg-white border border-pink-200 text-pink-700 rounded-lg font-semibold hover:bg-pink-50 disabled:opacity-50"
+                  >
+                    {/* Flip Camera SVG Icon */}
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M15.323 4.677a.75.75 0 00-1.06 1.06l1.362 1.362H5.75a.75.75 0 000 1.5h9.875l-1.362 1.363a.75.75 0 101.06 1.06l2.5-2.5a.75.75 0 000-1.06l-2.5-2.5zM4.677 15.323a.75.75 0 001.06-1.06L4.375 12.9H14.25a.75.75 0 000-1.5H4.375l1.362-1.363a.75.75 0 10-1.06-1.06l-2.5 2.5a.75.75 0 000 1.06l2.5 2.5z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                )}
+
               </div>
             </div>
           </aside>

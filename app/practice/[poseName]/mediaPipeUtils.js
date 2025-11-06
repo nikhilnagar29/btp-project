@@ -28,9 +28,10 @@ export const initMediaPipe = async (onResults) => {
 };
 
 /**
- * Requests camera access and starts the MediaPipe camera utility.
+ * UPDATED: Requests camera access and starts the MediaPipe camera utility.
+ * Now accepts a facingMode parameter.
  */
-export const initCamera = async (videoRef, poseInstance) => {
+export const initCamera = async (videoRef, poseInstance, facingMode = 'user') => { // <-- THIS LINE IS THE FIX
   const { Camera } = await import('@mediapipe/camera_utils');
   
   if (!window.isSecureContext && location.hostname !== 'localhost') {
@@ -45,10 +46,27 @@ export const initCamera = async (videoRef, poseInstance) => {
   }
   
   let stream;
+  const constraints = { // UPDATED constraint object
+    video: { 
+      facingMode: facingMode, // This variable is now defined from the function parameter
+      width: { ideal: 640 }, 
+      height: { ideal: 480 } 
+    }, 
+    audio: false 
+  };
+  
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (e1) {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    console.warn('Ideal constraints failed, trying simpler constraints', e1);
+    // Fallback if ideal constraints fail
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingMode }, audio: false });
+    } catch (e2) {
+      console.error('All camera attempts failed', e2);
+      // Final fallback to any video
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
   }
   
   if (videoRef.current) {
@@ -68,6 +86,16 @@ export const initCamera = async (videoRef, poseInstance) => {
   
   camera.start();
   return camera;
+};
+
+export const hasMultipleCameras = async () => {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter(d => d.kind === 'videoinput').length > 1;
+  } catch (e) {
+    console.error('Could not enumerate devices', e);
+    return false;
+  }
 };
 
 /**
