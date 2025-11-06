@@ -24,6 +24,14 @@ export const initMediaPipe = async (onResults) => {
     onResults(results, drawingUtils, POSE_CONNECTIONS);
   });
   
+  // --- THIS IS THE NEW, DIFFERENT METHOD ---
+  // We explicitly wait for the model files (.wasm, .data) to load
+  // BEFORE we return the instance. This prevents the camera from
+  // trying to send frames to a model that isn't ready, which
+  // causes the 'TypeError' and 'Aborted' errors on startup.
+  await poseInstance.initialize();
+  // --- END OF NEW METHOD ---
+
   return poseInstance;
 };
 
@@ -56,11 +64,30 @@ export const initCamera = async (videoRef, poseInstance) => {
     try { await videoRef.current.play(); } catch {}
   }
 
+  // --- THIS FLAG IS STILL REQUIRED ---
+  // This flag prevents the *other* race condition, where the camera
+  // sends a new frame (onFrame) before the previous frame (send)
+  // has finished processing.
+  let isSendingFrame = false;
+
   const camera = new Camera(videoRef.current, {
-    onFrame: async () => {
-      if (videoRef.current) {
-         await poseInstance.send({ image: videoRef.current });
+    onFrame: () => { // 1. REMOVED 'async'
+      // 2. Check if busy or if the instance isn't ready
+      if (!videoRef.current || isSendingFrame || !poseInstance) { 
+        return;
       }
+      
+      isSendingFrame = true; // 3. Set flag to "busy"
+      
+      // We use .then() instead of .finally() for broader compatibility
+      poseInstance.send({ image: videoRef.current })
+        .then(() => {
+          isSendingFrame = false; // 4. Unset flag when done
+        })
+        .catch((err) => {
+          console.error("Error sending frame to MediaPipe", err);
+          isSendingFrame = false; // 4. Also unset flag on error
+        });
     },
     width: 640,
     height: 480,
@@ -72,7 +99,7 @@ export const initCamera = async (videoRef, poseInstance) => {
 
 /**
  * Draws the pose landmarks and connectors on the canvas.
- * NOW ACCEPTS an array of landmarks to highlight in red.
+ * (This function is unchanged from your version)
  */
 export const drawPose = (ctx, results, drawing, POSE_CONNECTIONS, highlightLandmarks = []) => {
   ctx.save();

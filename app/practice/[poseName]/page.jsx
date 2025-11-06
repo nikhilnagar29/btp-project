@@ -204,25 +204,29 @@ export default function PracticePage() {
               2.  `w-full` makes it responsive.
               3.  The `video` and `canvas` inside must fill this container.
             */}
-            <div className="relative flex items-center justify-center w-full aspect-video rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
-              <video 
-                ref={videoRef} 
-                className="absolute  w-auto h-full object-cover transform " 
-                playsInline 
-                muted 
-              />
-              <canvas 
-                ref={canvasRef} 
-                className="absolute  w-auto h-full pointer-events-none transform" 
-              />
-              {/* Overlays are now correctly placed *inside* the container */}
-              <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
-              {warning && <WarningBar>{warning}</WarningBar>}
+            <div className="relative w-full rounded-2xl shadow-2xl overflow-hidden bg-black border border-white/10">
+            {/* Video element is NOT absolute. It will size naturally based on the stream. */}
+            <video 
+              ref={videoRef} 
+              className="w-full h-auto"  /* Key change here */
+              playsInline 
+              muted 
+            />
+            {/* Canvas is absolute, stretching to fill the parent container (which is sized by the video). */}
+            <canvas 
+              ref={canvasRef} 
+              className="absolute top-0 left-0 w-full h-full pointer-events-none" 
+            />
+            
+            {/* Overlays are still absolute, covering the container */}
+            <LoadingOverlay show={isCameraStarting} label="Starting camera — please allow access" />
+            {warning && <WarningBar>{warning}</WarningBar>}
 
-              <div className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm rounded-full px-3 py-1 text-sm font-semibold text-pink-700">
-                COACH
-              </div>
+            <div className="absolute top-3 left-3 bg-white/80 backdrop-blur-sm rounded-full px-3 py-1 text-sm font-semibold text-pink-700">
+              COACH
             </div>
+          </div>
+            
           </div>
 
           {/* Right: Analysis (1/4) (No changes here, this part is good) */}
